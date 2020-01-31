@@ -32,11 +32,13 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/replicaset"
+	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
+	e2erc "k8s.io/kubernetes/test/e2e/framework/rc"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	testutils "k8s.io/kubernetes/test/utils"
 
 	"github.com/onsi/ginkgo"
+
 	scaleclient "k8s.io/client-go/scale"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 )
@@ -104,28 +106,10 @@ type ResourceConsumer struct {
 	requestSizeCustomMetric  int
 }
 
-// GetResourceConsumerImage is a wrapper to get the fully qualified URI of the ResourceConsumer image
-func GetResourceConsumerImage() string {
-	return resourceConsumerImage
-}
-
 // NewDynamicResourceConsumer is a wrapper to create a new dynamic ResourceConsumer
 func NewDynamicResourceConsumer(name, nsName string, kind schema.GroupVersionKind, replicas, initCPUTotal, initMemoryTotal, initCustomMetric int, cpuLimit, memLimit int64, clientset clientset.Interface, scaleClient scaleclient.ScalesGetter) *ResourceConsumer {
 	return newResourceConsumer(name, nsName, kind, replicas, initCPUTotal, initMemoryTotal, initCustomMetric, dynamicConsumptionTimeInSeconds,
 		dynamicRequestSizeInMillicores, dynamicRequestSizeInMegabytes, dynamicRequestSizeCustomMetric, cpuLimit, memLimit, clientset, scaleClient, nil, nil)
-}
-
-// NewStaticResourceConsumer is a wrapper to create a new static ResourceConsumer
-// TODO this still defaults to replication controller
-func NewStaticResourceConsumer(name, nsName string, replicas, initCPUTotal, initMemoryTotal, initCustomMetric int, cpuLimit, memLimit int64, clientset clientset.Interface, scaleClient scaleclient.ScalesGetter) *ResourceConsumer {
-	return newResourceConsumer(name, nsName, KindRC, replicas, initCPUTotal, initMemoryTotal, initCustomMetric, staticConsumptionTimeInSeconds,
-		initCPUTotal/replicas, initMemoryTotal/replicas, initCustomMetric/replicas, cpuLimit, memLimit, clientset, scaleClient, nil, nil)
-}
-
-// NewMetricExporter is a wrapper to create a new ResourceConsumer for metrics exporter
-func NewMetricExporter(name, nsName string, podAnnotations, serviceAnnotations map[string]string, metricValue int, clientset clientset.Interface, scaleClient scaleclient.ScalesGetter) *ResourceConsumer {
-	return newResourceConsumer(name, nsName, KindDeployment, 1, 0, 0, metricValue, dynamicConsumptionTimeInSeconds,
-		dynamicRequestSizeInMillicores, dynamicRequestSizeInMegabytes, dynamicRequestSizeCustomMetric, 100, 100, clientset, scaleClient, podAnnotations, serviceAnnotations)
 }
 
 /*
@@ -263,14 +247,13 @@ func (rc *ResourceConsumer) sendConsumeCPURequest(millicores int) {
 		proxyRequest, err := e2eservice.GetServicesProxyRequest(rc.clientSet, rc.clientSet.CoreV1().RESTClient().Post())
 		framework.ExpectNoError(err)
 		req := proxyRequest.Namespace(rc.nsName).
-			Context(ctx).
 			Name(rc.controllerName).
 			Suffix("ConsumeCPU").
 			Param("millicores", strconv.Itoa(millicores)).
 			Param("durationSec", strconv.Itoa(rc.consumptionTimeInSeconds)).
 			Param("requestSizeMillicores", strconv.Itoa(rc.requestSizeInMillicores))
 		framework.Logf("ConsumeCPU URL: %v", *req.URL())
-		_, err = req.DoRaw()
+		_, err = req.DoRaw(ctx)
 		if err != nil {
 			framework.Logf("ConsumeCPU failure: %v", err)
 			return false, nil
@@ -290,14 +273,13 @@ func (rc *ResourceConsumer) sendConsumeMemRequest(megabytes int) {
 		proxyRequest, err := e2eservice.GetServicesProxyRequest(rc.clientSet, rc.clientSet.CoreV1().RESTClient().Post())
 		framework.ExpectNoError(err)
 		req := proxyRequest.Namespace(rc.nsName).
-			Context(ctx).
 			Name(rc.controllerName).
 			Suffix("ConsumeMem").
 			Param("megabytes", strconv.Itoa(megabytes)).
 			Param("durationSec", strconv.Itoa(rc.consumptionTimeInSeconds)).
 			Param("requestSizeMegabytes", strconv.Itoa(rc.requestSizeInMegabytes))
 		framework.Logf("ConsumeMem URL: %v", *req.URL())
-		_, err = req.DoRaw()
+		_, err = req.DoRaw(ctx)
 		if err != nil {
 			framework.Logf("ConsumeMem failure: %v", err)
 			return false, nil
@@ -317,7 +299,6 @@ func (rc *ResourceConsumer) sendConsumeCustomMetric(delta int) {
 		proxyRequest, err := e2eservice.GetServicesProxyRequest(rc.clientSet, rc.clientSet.CoreV1().RESTClient().Post())
 		framework.ExpectNoError(err)
 		req := proxyRequest.Namespace(rc.nsName).
-			Context(ctx).
 			Name(rc.controllerName).
 			Suffix("BumpMetric").
 			Param("metric", customMetricName).
@@ -325,7 +306,7 @@ func (rc *ResourceConsumer) sendConsumeCustomMetric(delta int) {
 			Param("durationSec", strconv.Itoa(rc.consumptionTimeInSeconds)).
 			Param("requestSizeMetrics", strconv.Itoa(rc.requestSizeCustomMetric))
 		framework.Logf("ConsumeCustomMetric URL: %v", *req.URL())
-		_, err = req.DoRaw()
+		_, err = req.DoRaw(ctx)
 		if err != nil {
 			framework.Logf("ConsumeCustomMetric failure: %v", err)
 			return false, nil
@@ -379,11 +360,6 @@ func (rc *ResourceConsumer) WaitForReplicas(desiredReplicas int, duration time.D
 		return replicas == desiredReplicas, nil // Expected number of replicas found. Exit.
 	})
 	framework.ExpectNoErrorWithOffset(1, err, "timeout waiting %v for %d replicas", duration, desiredReplicas)
-}
-
-// EnsureDesiredReplicas ensure the replicas to desired number
-func (rc *ResourceConsumer) EnsureDesiredReplicas(desiredReplicas int, duration time.Duration, hpaName string) {
-	rc.EnsureDesiredReplicasInRange(desiredReplicas, desiredReplicas, duration, hpaName)
 }
 
 // EnsureDesiredReplicasInRange ensure the replicas is in a desired range
@@ -483,21 +459,21 @@ func runServiceAndWorkloadForResourceConsumer(c clientset.Interface, ns, name st
 
 	switch kind {
 	case KindRC:
-		framework.ExpectNoError(framework.RunRC(rcConfig))
+		framework.ExpectNoError(e2erc.RunRC(rcConfig))
 	case KindDeployment:
 		dpConfig := testutils.DeploymentConfig{
 			RCConfig: rcConfig,
 		}
 		ginkgo.By(fmt.Sprintf("creating deployment %s in namespace %s", dpConfig.Name, dpConfig.Namespace))
 		dpConfig.NodeDumpFunc = framework.DumpNodeDebugInfo
-		dpConfig.ContainerDumpFunc = framework.LogFailedContainers
+		dpConfig.ContainerDumpFunc = e2ekubectl.LogFailedContainers
 		framework.ExpectNoError(testutils.RunDeployment(dpConfig))
 	case KindReplicaSet:
 		rsConfig := testutils.ReplicaSetConfig{
 			RCConfig: rcConfig,
 		}
 		ginkgo.By(fmt.Sprintf("creating replicaset %s in namespace %s", rsConfig.Name, rsConfig.Namespace))
-		framework.ExpectNoError(replicaset.RunReplicaSet(rsConfig))
+		framework.ExpectNoError(runReplicaSet(rsConfig))
 	default:
 		framework.Failf(invalidKind)
 	}
@@ -532,7 +508,7 @@ func runServiceAndWorkloadForResourceConsumer(c clientset.Interface, ns, name st
 		Command:   []string{"/controller", "--consumer-service-name=" + name, "--consumer-service-namespace=" + ns, "--consumer-port=80"},
 		DNSPolicy: &dnsClusterFirst,
 	}
-	framework.ExpectNoError(framework.RunRC(controllerRcConfig))
+	framework.ExpectNoError(e2erc.RunRC(controllerRcConfig))
 
 	// Wait for endpoints to propagate for the controller service.
 	framework.ExpectNoError(framework.WaitForServiceEndpointsNum(
@@ -566,4 +542,12 @@ func CreateCPUHorizontalPodAutoscaler(rc *ResourceConsumer, cpu, minReplicas, ma
 // DeleteHorizontalPodAutoscaler delete the horizontalPodAutoscaler for consuming resources.
 func DeleteHorizontalPodAutoscaler(rc *ResourceConsumer, autoscalerName string) {
 	rc.clientSet.AutoscalingV1().HorizontalPodAutoscalers(rc.nsName).Delete(autoscalerName, nil)
+}
+
+// runReplicaSet launches (and verifies correctness) of a replicaset.
+func runReplicaSet(config testutils.ReplicaSetConfig) error {
+	ginkgo.By(fmt.Sprintf("creating replicaset %s in namespace %s", config.Name, config.Namespace))
+	config.NodeDumpFunc = framework.DumpNodeDebugInfo
+	config.ContainerDumpFunc = e2ekubectl.LogFailedContainers
+	return testutils.RunReplicaSet(config)
 }

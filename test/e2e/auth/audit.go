@@ -17,6 +17,7 @@ limitations under the License.
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/framework/auth"
 	e2edeploy "k8s.io/kubernetes/test/e2e/framework/deployment"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
@@ -62,7 +64,7 @@ var _ = SIGDescribe("Advanced Audit [DisabledForLargeClusters][Flaky]", func() {
 	f := framework.NewDefaultFramework("audit")
 	var namespace string
 	ginkgo.BeforeEach(func() {
-		framework.SkipUnlessProviderIs("gce")
+		e2eskipper.SkipUnlessProviderIs("gce")
 		namespace = f.Namespace.Name
 	})
 
@@ -655,7 +657,7 @@ var _ = SIGDescribe("Advanced Audit [DisabledForLargeClusters][Flaky]", func() {
 	// test authorizer annotations, RBAC is required.
 	ginkgo.It("should audit API calls to get a pod with unauthorized user.", func() {
 		if !auth.IsRBACEnabled(f.ClientSet.RbacV1()) {
-			framework.Skipf("RBAC not enabled.")
+			e2eskipper.Skipf("RBAC not enabled.")
 		}
 
 		ginkgo.By("Creating a kubernetes client that impersonates an unauthorized anonymous user")
@@ -732,7 +734,7 @@ func expectEvents(f *framework.Framework, expectedEvents []utils.AuditEvent) {
 	pollingTimeout := 5 * time.Minute
 	err := wait.Poll(pollingInterval, pollingTimeout, func() (bool, error) {
 		// Fetch the log stream.
-		stream, err := f.ClientSet.CoreV1().RESTClient().Get().AbsPath("/logs/kube-apiserver-audit.log").Stream()
+		stream, err := f.ClientSet.CoreV1().RESTClient().Get().AbsPath("/logs/kube-apiserver-audit.log").Stream(context.TODO())
 		if err != nil {
 			return false, err
 		}

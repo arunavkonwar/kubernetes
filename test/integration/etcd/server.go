@@ -135,10 +135,10 @@ func StartRealMasterOrDie(t *testing.T, configFuncs ...func(*options.ServerRunOp
 
 		prepared, err := kubeAPIServer.PrepareRun()
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
 		}
 		if err := prepared.Run(stopCh); err != nil {
-			t.Fatal(err)
+			t.Error(err)
 		}
 	}()
 
@@ -146,7 +146,7 @@ func StartRealMasterOrDie(t *testing.T, configFuncs ...func(*options.ServerRunOp
 	attempt := 0
 	if err := wait.PollImmediate(time.Second, time.Minute, func() (done bool, err error) {
 		// wait for the server to be healthy
-		result := kubeClient.RESTClient().Get().AbsPath("/healthz").Do()
+		result := kubeClient.RESTClient().Get().AbsPath("/healthz").Do(context.TODO())
 		content, _ := result.Raw()
 		lastHealth = string(content)
 		if errResult := result.Error(); errResult != nil {
@@ -174,7 +174,7 @@ func StartRealMasterOrDie(t *testing.T, configFuncs ...func(*options.ServerRunOp
 	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(discoveryClient)
 	restMapper.Reset()
 
-	serverResources, err := kubeClient.Discovery().ServerResources()
+	_, serverResources, err := kubeClient.Discovery().ServerGroupsAndResources()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -132,8 +132,6 @@ func fakePodWithPVC(name, pvcName, namespace string) (*v1.Pod, *v1.PersistentVol
 	return fakePod, fakePVC
 }
 
-type podCountFunc func(int) bool
-
 var defaultTimerConfig = attachdetach.TimerConfig{
 	ReconcilerLoopPeriod:                              100 * time.Millisecond,
 	ReconcilerMaxWaitForUnmountDuration:               6 * time.Second,
@@ -408,7 +406,7 @@ func createAdClients(ns *v1.Namespace, t *testing.T, server *httptest.Server, sy
 	resyncPeriod := 12 * time.Hour
 	testClient := clientset.NewForConfigOrDie(&config)
 
-	host := volumetest.NewFakeVolumeHost("/tmp/fake", nil, nil)
+	host := volumetest.NewFakeVolumeHost(t, "/tmp/fake", nil, nil)
 	plugin := &volumetest.FakeVolumePlugin{
 		PluginName:             provisionerPluginName,
 		Host:                   host,

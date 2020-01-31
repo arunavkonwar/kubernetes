@@ -27,7 +27,7 @@ import (
 	"github.com/onsi/ginkgo"
 	v1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
@@ -45,6 +45,7 @@ import (
 	e2enetwork "k8s.io/kubernetes/test/e2e/framework/network"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2erc "k8s.io/kubernetes/test/e2e/framework/rc"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 )
@@ -445,7 +446,7 @@ func (j *TestJig) UpdateService(update func(*v1.Service)) (*v1.Service, error) {
 		if err == nil {
 			return j.sanityCheckService(result, service.Spec.Type)
 		}
-		if !errors.IsConflict(err) && !errors.IsServerTimeout(err) {
+		if !apierrors.IsConflict(err) && !apierrors.IsServerTimeout(err) {
 			return nil, fmt.Errorf("failed to update Service %q: %v", j.Name, err)
 		}
 	}
@@ -679,6 +680,7 @@ func (j *TestJig) Scale(replicas int) error {
 		return fmt.Errorf("failed to get scale for RC %q: %v", rc, err)
 	}
 
+	scale.ResourceVersion = "" // indicate the scale update should be unconditional
 	scale.Spec.Replicas = int32(replicas)
 	_, err = j.Client.CoreV1().ReplicationControllers(j.Namespace).UpdateScale(rc, scale)
 	if err != nil {
@@ -701,7 +703,7 @@ func (j *TestJig) waitForPdbReady() error {
 		if err != nil {
 			return err
 		}
-		if pdb.Status.PodDisruptionsAllowed > 0 {
+		if pdb.Status.DisruptionsAllowed > 0 {
 			return nil
 		}
 	}
@@ -931,7 +933,7 @@ func (j *TestJig) CreateServicePods(replica int) error {
 		Timeout:      framework.PodReadyBeforeTimeout,
 		Replicas:     replica,
 	}
-	return framework.RunRC(config)
+	return e2erc.RunRC(config)
 }
 
 // CreateTCPUDPServicePods creates a replication controller with the label same as service. Service listens to TCP and UDP.
@@ -947,5 +949,5 @@ func (j *TestJig) CreateTCPUDPServicePods(replica int) error {
 		Timeout:      framework.PodReadyBeforeTimeout,
 		Replicas:     replica,
 	}
-	return framework.RunRC(config)
+	return e2erc.RunRC(config)
 }

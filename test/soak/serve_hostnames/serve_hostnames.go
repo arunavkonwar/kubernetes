@@ -23,6 +23,7 @@ a serivce
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -30,7 +31,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -127,7 +128,7 @@ func main() {
 			// wait until the namespace disappears
 			for i := 0; i < int(namespaceDeleteTimeout/time.Second); i++ {
 				if _, err := client.CoreV1().Namespaces().Get(ns, metav1.GetOptions{}); err != nil {
-					if errors.IsNotFound(err) {
+					if apierrors.IsNotFound(err) {
 						return
 					}
 				}
@@ -273,7 +274,7 @@ func main() {
 		hostname, err := proxyRequest.
 			Namespace(ns).
 			Name("serve-hostnames").
-			DoRaw()
+			DoRaw(context.TODO())
 		if err != nil {
 			klog.Infof("After %v while making a proxy call got error %v", time.Since(start), err)
 			continue
@@ -303,7 +304,7 @@ func main() {
 				hostname, err := proxyRequest.
 					Namespace(ns).
 					Name("serve-hostnames").
-					DoRaw()
+					DoRaw(context.TODO())
 				klog.V(4).Infof("Proxy call in namespace %s took %v", ns, time.Since(t))
 				if err != nil {
 					klog.Warningf("Call failed during iteration %d query %d : %v", i, query, err)

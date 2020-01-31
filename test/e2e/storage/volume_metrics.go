@@ -35,6 +35,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework/metrics"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/testsuites"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 )
@@ -56,7 +57,7 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		c = f.ClientSet
 		ns = f.Namespace.Name
 		var err error
-		framework.SkipUnlessProviderIs("gce", "gke", "aws")
+		e2eskipper.SkipUnlessProviderIs("gce", "gke", "aws")
 		defaultScName, err = e2epv.GetDefaultStorageClassName(c)
 		if err != nil {
 			framework.Failf(err.Error())
@@ -101,14 +102,19 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		var err error
 
 		if !metricsGrabber.HasRegisteredMaster() {
-			framework.Skipf("Environment does not support getting controller-manager metrics - skipping")
+			e2eskipper.Skipf("Environment does not support getting controller-manager metrics - skipping")
 		}
+
+		ginkgo.By("Getting plugin name")
+		defaultClass, err := c.StorageV1().StorageClasses().Get(defaultScName, metav1.GetOptions{})
+		framework.ExpectNoError(err, "Error getting default storageclass: %v", err)
+		pluginName := defaultClass.Provisioner
 
 		controllerMetrics, err := metricsGrabber.GrabFromControllerManager()
 
 		framework.ExpectNoError(err, "Error getting c-m metrics : %v", err)
 
-		storageOpMetrics := getControllerStorageMetrics(controllerMetrics)
+		storageOpMetrics := getControllerStorageMetrics(controllerMetrics, pluginName)
 
 		pvc, err = c.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(pvc)
 		framework.ExpectNoError(err)
@@ -121,12 +127,12 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		framework.ExpectNoError(err)
 
 		err = e2epod.WaitForPodRunningInNamespace(c, pod)
-		framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(c, pod), "Error starting pod %s", pod.Name)
+		framework.ExpectNoError(err, "Error starting pod %s", pod.Name)
 
 		framework.Logf("Deleting pod %q/%q", pod.Namespace, pod.Name)
 		framework.ExpectNoError(e2epod.DeletePodWithWait(c, pod))
 
-		updatedStorageMetrics := waitForDetachAndGrabMetrics(storageOpMetrics, metricsGrabber)
+		updatedStorageMetrics := waitForDetachAndGrabMetrics(storageOpMetrics, metricsGrabber, pluginName)
 
 		framework.ExpectNotEqual(len(updatedStorageMetrics.latencyMetrics), 0, "Error fetching c-m updated storage metrics")
 		framework.ExpectNotEqual(len(updatedStorageMetrics.statusMetrics), 0, "Error fetching c-m updated storage metrics")
@@ -142,18 +148,19 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		var err error
 
 		if !metricsGrabber.HasRegisteredMaster() {
-			framework.Skipf("Environment does not support getting controller-manager metrics - skipping")
+			e2eskipper.Skipf("Environment does not support getting controller-manager metrics - skipping")
 		}
+
+		ginkgo.By("Geting default storageclass")
+		defaultClass, err := c.StorageV1().StorageClasses().Get(defaultScName, metav1.GetOptions{})
+		framework.ExpectNoError(err, "Error getting default storageclass: %v", err)
+		pluginName := defaultClass.Provisioner
 
 		controllerMetrics, err := metricsGrabber.GrabFromControllerManager()
 
 		framework.ExpectNoError(err, "Error getting c-m metrics : %v", err)
 
-		storageOpMetrics := getControllerStorageMetrics(controllerMetrics)
-
-		ginkgo.By("Creating an invalid storageclass")
-		defaultClass, err := c.StorageV1().StorageClasses().Get(defaultScName, metav1.GetOptions{})
-		framework.ExpectNoError(err, "Error getting default storageclass: %v", err)
+		storageOpMetrics := getControllerStorageMetrics(controllerMetrics, pluginName)
 
 		invalidSc = &storagev1.StorageClass{
 			ObjectMeta: metav1.ObjectMeta{
@@ -188,7 +195,7 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		ginkgo.By("Checking failure metrics")
 		updatedControllerMetrics, err := metricsGrabber.GrabFromControllerManager()
 		framework.ExpectNoError(err, "failed to get controller manager metrics")
-		updatedStorageMetrics := getControllerStorageMetrics(updatedControllerMetrics)
+		updatedStorageMetrics := getControllerStorageMetrics(updatedControllerMetrics, pluginName)
 
 		framework.ExpectNotEqual(len(updatedStorageMetrics.statusMetrics), 0, "Error fetching c-m updated storage metrics")
 		verifyMetricCount(storageOpMetrics, updatedStorageMetrics, "volume_provision", true)
@@ -206,7 +213,7 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		framework.ExpectNoError(err)
 
 		err = e2epod.WaitForPodRunningInNamespace(c, pod)
-		framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(c, pod), "Error starting pod ", pod.Name)
+		framework.ExpectNoError(err, "Error starting pod ", pod.Name)
 
 		pod, err = c.CoreV1().Pods(ns).Get(pod.Name, metav1.GetOptions{})
 		framework.ExpectNoError(err)
@@ -220,6 +227,8 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 			kubeletmetrics.VolumeStatsInodesFreeKey,
 			kubeletmetrics.VolumeStatsInodesUsedKey,
 		}
+		key := volumeStatKeys[0]
+		kubeletKeyName := fmt.Sprintf("%s_%s", kubeletmetrics.KubeletSubsystem, key)
 		// Poll kubelet metrics waiting for the volume to be picked up
 		// by the volume stats collector
 		var kubeMetrics metrics.KubeletMetrics
@@ -232,19 +241,17 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 				framework.Logf("Error fetching kubelet metrics")
 				return false, err
 			}
-			key := volumeStatKeys[0]
-			kubeletKeyName := fmt.Sprintf("%s_%s", kubeletmetrics.KubeletSubsystem, key)
 			if !findVolumeStatMetric(kubeletKeyName, pvc.Namespace, pvc.Name, kubeMetrics) {
 				return false, nil
 			}
 			return true, nil
 		})
-		framework.ExpectNoError(waitErr, "Error finding volume metrics : %v", waitErr)
+		framework.ExpectNoError(waitErr, "Unable to find metric %s for PVC %s/%s", kubeletKeyName, pvc.Namespace, pvc.Name)
 
 		for _, key := range volumeStatKeys {
 			kubeletKeyName := fmt.Sprintf("%s_%s", kubeletmetrics.KubeletSubsystem, key)
 			found := findVolumeStatMetric(kubeletKeyName, pvc.Namespace, pvc.Name, kubeMetrics)
-			gomega.Expect(found).To(gomega.BeTrue(), "PVC %s, Namespace %s not found for %s", pvc.Name, pvc.Namespace, kubeletKeyName)
+			framework.ExpectEqual(found, true, "PVC %s, Namespace %s not found for %s", pvc.Name, pvc.Namespace, kubeletKeyName)
 		}
 
 		framework.Logf("Deleting pod %q/%q", pod.Namespace, pod.Name)
@@ -263,20 +270,20 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		framework.ExpectNoError(err)
 
 		err = e2epod.WaitForPodRunningInNamespace(c, pod)
-		framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(c, pod), "Error starting pod ", pod.Name)
+		framework.ExpectNoError(err, "Error starting pod ", pod.Name)
 
 		pod, err = c.CoreV1().Pods(ns).Get(pod.Name, metav1.GetOptions{})
 		framework.ExpectNoError(err)
 
 		controllerMetrics, err := metricsGrabber.GrabFromControllerManager()
 		if err != nil {
-			framework.Skipf("Could not get controller-manager metrics - skipping")
+			e2eskipper.Skipf("Could not get controller-manager metrics - skipping")
 		}
 
 		metricKey := "volume_operation_total_seconds_count"
 		dimensions := []string{"operation_name", "plugin_name"}
 		valid := hasValidMetrics(testutil.Metrics(controllerMetrics), metricKey, dimensions...)
-		gomega.Expect(valid).To(gomega.BeTrue(), "Invalid metric in P/V Controller metrics: %q", metricKey)
+		framework.ExpectEqual(valid, true, "Invalid metric in P/V Controller metrics: %q", metricKey)
 
 		framework.Logf("Deleting pod %q/%q", pod.Namespace, pod.Name)
 		framework.ExpectNoError(e2epod.DeletePodWithWait(c, pod))
@@ -294,7 +301,7 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		framework.ExpectNoError(err)
 
 		err = e2epod.WaitForPodRunningInNamespace(c, pod)
-		framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(c, pod), "Error starting pod ", pod.Name)
+		framework.ExpectNoError(err, "Error starting pod ", pod.Name)
 
 		pod, err = c.CoreV1().Pods(ns).Get(pod.Name, metav1.GetOptions{})
 		framework.ExpectNoError(err)
@@ -306,7 +313,7 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		totalVolumesKey := "volume_manager_total_volumes"
 		dimensions := []string{"state", "plugin_name"}
 		valid := hasValidMetrics(testutil.Metrics(kubeMetrics), totalVolumesKey, dimensions...)
-		gomega.Expect(valid).To(gomega.BeTrue(), "Invalid metric in Volume Manager metrics: %q", totalVolumesKey)
+		framework.ExpectEqual(valid, true, "Invalid metric in Volume Manager metrics: %q", totalVolumesKey)
 
 		framework.Logf("Deleting pod %q/%q", pod.Namespace, pod.Name)
 		framework.ExpectNoError(e2epod.DeletePodWithWait(c, pod))
@@ -324,27 +331,27 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 		// Get metrics
 		controllerMetrics, err := metricsGrabber.GrabFromControllerManager()
 		if err != nil {
-			framework.Skipf("Could not get controller-manager metrics - skipping")
+			e2eskipper.Skipf("Could not get controller-manager metrics - skipping")
 		}
 
 		// Create pod
 		pod, err = c.CoreV1().Pods(ns).Create(pod)
 		framework.ExpectNoError(err)
 		err = e2epod.WaitForPodRunningInNamespace(c, pod)
-		framework.ExpectNoError(e2epod.WaitForPodRunningInNamespace(c, pod), "Error starting pod ", pod.Name)
+		framework.ExpectNoError(err, "Error starting pod ", pod.Name)
 		pod, err = c.CoreV1().Pods(ns).Get(pod.Name, metav1.GetOptions{})
 		framework.ExpectNoError(err)
 
 		// Get updated metrics
 		updatedControllerMetrics, err := metricsGrabber.GrabFromControllerManager()
 		if err != nil {
-			framework.Skipf("Could not get controller-manager metrics - skipping")
+			e2eskipper.Skipf("Could not get controller-manager metrics - skipping")
 		}
 
 		// Forced detach metric should be present
 		forceDetachKey := "attachdetach_controller_forced_detaches"
 		_, ok := updatedControllerMetrics[forceDetachKey]
-		gomega.Expect(ok).To(gomega.BeTrue(), "Key %q not found in A/D Controller metrics", forceDetachKey)
+		framework.ExpectEqual(ok, true, "Key %q not found in A/D Controller metrics", forceDetachKey)
 
 		// Wait and validate
 		totalVolumesKey := "attachdetach_controller_total_volumes"
@@ -441,7 +448,7 @@ var _ = utils.SIGDescribe("[Serial] Volume metrics", func() {
 
 		ginkgo.BeforeEach(func() {
 			if !metricsGrabber.HasRegisteredMaster() {
-				framework.Skipf("Environment does not support getting controller-manager metrics - skipping")
+				e2eskipper.Skipf("Environment does not support getting controller-manager metrics - skipping")
 			}
 
 			pv = e2epv.MakePersistentVolume(pvConfig)
@@ -521,7 +528,7 @@ func newStorageControllerMetrics() *storageControllerMetrics {
 	}
 }
 
-func waitForDetachAndGrabMetrics(oldMetrics *storageControllerMetrics, metricsGrabber *metrics.Grabber) *storageControllerMetrics {
+func waitForDetachAndGrabMetrics(oldMetrics *storageControllerMetrics, metricsGrabber *metrics.Grabber, pluginName string) *storageControllerMetrics {
 	backoff := wait.Backoff{
 		Duration: 10 * time.Second,
 		Factor:   1.2,
@@ -542,7 +549,7 @@ func waitForDetachAndGrabMetrics(oldMetrics *storageControllerMetrics, metricsGr
 			return false, err
 		}
 
-		updatedStorageMetrics = getControllerStorageMetrics(updatedMetrics)
+		updatedStorageMetrics = getControllerStorageMetrics(updatedMetrics, pluginName)
 		newDetachCount, ok := updatedStorageMetrics.latencyMetrics["volume_detach"]
 
 		// if detach metrics are not yet there, we need to retry
@@ -555,11 +562,12 @@ func waitForDetachAndGrabMetrics(oldMetrics *storageControllerMetrics, metricsGr
 		if oldDetachCount >= newDetachCount {
 			return false, nil
 		}
+
 		return true, nil
 	}
 
 	waitErr := wait.ExponentialBackoff(backoff, verifyMetricFunc)
-	framework.ExpectNoError(waitErr, "Timeout error fetching storage c-m metrics : %v", waitErr)
+	framework.ExpectNoError(waitErr, "Unable to get updated metrics for plugin %s", pluginName)
 	return updatedStorageMetrics
 }
 
@@ -581,10 +589,10 @@ func verifyMetricCount(oldMetrics, newMetrics *storageControllerMetrics, metricN
 
 	newLatencyCount, ok := newMetrics.latencyMetrics[metricName]
 	if !expectFailure {
-		gomega.Expect(ok).To(gomega.BeTrue(), "Error getting updated latency metrics for %s", metricName)
+		framework.ExpectEqual(ok, true, "Error getting updated latency metrics for %s", metricName)
 	}
 	newStatusCounts, ok := newMetrics.statusMetrics[metricName]
-	gomega.Expect(ok).To(gomega.BeTrue(), "Error getting updated status metrics for %s", metricName)
+	framework.ExpectEqual(ok, true, "Error getting updated status metrics for %s", metricName)
 
 	newStatusCount := int64(0)
 	if expectFailure {
@@ -602,7 +610,7 @@ func verifyMetricCount(oldMetrics, newMetrics *storageControllerMetrics, metricN
 	gomega.Expect(newStatusCount).To(gomega.BeNumerically(">", oldStatusCount), "New status count %d should be more than old count %d for action %s", newStatusCount, oldStatusCount, metricName)
 }
 
-func getControllerStorageMetrics(ms metrics.ControllerManagerMetrics) *storageControllerMetrics {
+func getControllerStorageMetrics(ms metrics.ControllerManagerMetrics, pluginName string) *storageControllerMetrics {
 	result := newStorageControllerMetrics()
 
 	for method, samples := range ms {
@@ -612,6 +620,10 @@ func getControllerStorageMetrics(ms metrics.ControllerManagerMetrics) *storageCo
 			for _, sample := range samples {
 				count := int64(sample.Value)
 				operation := string(sample.Metric["operation_name"])
+				metricPluginName := string(sample.Metric["volume_plugin"])
+				if len(pluginName) > 0 && pluginName != metricPluginName {
+					continue
+				}
 				result.latencyMetrics[operation] = count
 			}
 		case "storage_operation_status_count":
@@ -620,6 +632,10 @@ func getControllerStorageMetrics(ms metrics.ControllerManagerMetrics) *storageCo
 				operation := string(sample.Metric["operation_name"])
 				status := string(sample.Metric["status"])
 				statusCounts := result.statusMetrics[operation]
+				metricPluginName := string(sample.Metric["volume_plugin"])
+				if len(pluginName) > 0 && pluginName != metricPluginName {
+					continue
+				}
 				switch status {
 				case "success":
 					statusCounts.successCount = count
@@ -682,8 +698,7 @@ func waitForPVControllerSync(metricsGrabber *metrics.Grabber, metricName, dimens
 		return len(getPVControllerMetrics(updatedMetrics, metricName, dimension)) > 0, nil
 	}
 	waitErr := wait.ExponentialBackoff(backoff, verifyMetricFunc)
-	framework.ExpectNoError(waitErr,
-		"Timeout error fetching pv controller metrics : %v", waitErr)
+	framework.ExpectNoError(waitErr, "Unable to get pv controller metrics")
 }
 
 func getPVControllerMetrics(ms metrics.ControllerManagerMetrics, metricName, dimension string) map[string]int64 {
@@ -757,7 +772,7 @@ func waitForADControllerStatesMetrics(metricsGrabber *metrics.Grabber, metricNam
 	verifyMetricFunc := func() (bool, error) {
 		updatedMetrics, err := metricsGrabber.GrabFromControllerManager()
 		if err != nil {
-			framework.Skipf("Could not get controller-manager metrics - skipping")
+			e2eskipper.Skipf("Could not get controller-manager metrics - skipping")
 			return false, err
 		}
 		if !hasValidMetrics(testutil.Metrics(updatedMetrics), metricName, dimensions...) {
@@ -772,5 +787,5 @@ func waitForADControllerStatesMetrics(metricsGrabber *metrics.Grabber, metricNam
 		return true, nil
 	}
 	waitErr := wait.ExponentialBackoff(backoff, verifyMetricFunc)
-	framework.ExpectNoError(waitErr, "Timeout error fetching A/D controller metrics : %v", waitErr)
+	framework.ExpectNoError(waitErr, "Unable to get A/D controller metrics")
 }

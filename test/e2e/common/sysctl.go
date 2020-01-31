@@ -20,9 +20,9 @@ import (
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/kubernetes/pkg/kubelet/sysctl"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
 	"github.com/onsi/ginkgo"
@@ -33,7 +33,7 @@ var _ = framework.KubeDescribe("Sysctls [LinuxOnly] [NodeFeature:Sysctls]", func
 
 	ginkgo.BeforeEach(func() {
 		// sysctl is not supported on Windows.
-		framework.SkipIfNodeOSDistroIs("windows")
+		e2eskipper.SkipIfNodeOSDistroIs("windows")
 	})
 
 	f := framework.NewDefaultFramework("sysctl")
@@ -85,9 +85,6 @@ var _ = framework.KubeDescribe("Sysctls [LinuxOnly] [NodeFeature:Sysctls]", func
 		// might have already been deleted here.
 		ev, err := f.PodClient().WaitForErrorEventOrSuccess(pod)
 		framework.ExpectNoError(err)
-		if ev != nil && ev.Reason == sysctl.UnsupportedReason {
-			framework.Skipf("No sysctl support in Docker <1.12")
-		}
 		gomega.Expect(ev).To(gomega.BeNil())
 
 		ginkgo.By("Waiting for pod completion")
@@ -128,9 +125,6 @@ var _ = framework.KubeDescribe("Sysctls [LinuxOnly] [NodeFeature:Sysctls]", func
 		// might have already been deleted here.
 		ev, err := f.PodClient().WaitForErrorEventOrSuccess(pod)
 		framework.ExpectNoError(err)
-		if ev != nil && ev.Reason == sysctl.UnsupportedReason {
-			framework.Skipf("No sysctl support in Docker <1.12")
-		}
 		gomega.Expect(ev).To(gomega.BeNil())
 
 		ginkgo.By("Waiting for pod completion")
@@ -205,9 +199,6 @@ var _ = framework.KubeDescribe("Sysctls [LinuxOnly] [NodeFeature:Sysctls]", func
 		// might have already been deleted here.
 		ev, err := f.PodClient().WaitForErrorEventOrSuccess(pod)
 		framework.ExpectNoError(err)
-		if ev != nil && ev.Reason == sysctl.UnsupportedReason {
-			framework.Skipf("No sysctl support in Docker <1.12")
-		}
 
 		ginkgo.By("Checking that the pod was rejected")
 		gomega.Expect(ev).ToNot(gomega.BeNil())

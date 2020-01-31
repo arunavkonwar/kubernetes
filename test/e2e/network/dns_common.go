@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	dnsutil "github.com/miekg/dns"
+
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -81,10 +82,6 @@ func (t *dnsTestCommon) init() {
 	}
 }
 
-func (t *dnsTestCommon) checkDNSRecord(name string, predicate func([]string) bool, timeout time.Duration) {
-	t.checkDNSRecordFrom(name, predicate, "kube-dns", timeout)
-}
-
 func (t *dnsTestCommon) checkDNSRecordFrom(name string, predicate func([]string) bool, target string, timeout time.Duration) {
 	var actual []string
 
@@ -118,7 +115,6 @@ func (t *dnsTestCommon) runDig(dnsName, target string) []string {
 	case "cluster-dns":
 	case "cluster-dns-ipv6":
 		cmd = append(cmd, "AAAA")
-		break
 	default:
 		panic(fmt.Errorf("invalid target: " + target))
 	}
@@ -269,6 +265,7 @@ func (t *dnsTestCommon) deleteCoreDNSPods() {
 	options := metav1.ListOptions{LabelSelector: label.String()}
 
 	pods, err := t.f.ClientSet.CoreV1().Pods("kube-system").List(options)
+	framework.ExpectNoError(err, "failed to list pods of kube-system with label %q", label.String())
 	podClient := t.c.CoreV1().Pods(metav1.NamespaceSystem)
 
 	for _, pod := range pods.Items {
@@ -531,13 +528,12 @@ func assertFilesContain(fileNames []string, fileDir string, pod *v1.Pod, client 
 
 		for _, fileName := range fileNames {
 			contents, err := client.CoreV1().RESTClient().Get().
-				Context(ctx).
 				Namespace(pod.Namespace).
 				Resource("pods").
 				SubResource("proxy").
 				Name(pod.Name).
 				Suffix(fileDir, fileName).
-				Do().Raw()
+				Do(ctx).Raw()
 
 			if err != nil {
 				if ctx.Err() != nil {
@@ -612,14 +608,6 @@ func validateTargetedProbeOutput(f *framework.Framework, pod *v1.Pod, fileNames 
 	assertFilesContain(fileNames, "results", pod, f.ClientSet, true, value)
 
 	framework.Logf("DNS probes using %s succeeded\n", pod.Name)
-}
-
-func reverseArray(arr []string) []string {
-	for i := 0; i < len(arr)/2; i++ {
-		j := len(arr) - i - 1
-		arr[i], arr[j] = arr[j], arr[i]
-	}
-	return arr
 }
 
 func generateDNSUtilsPod() *v1.Pod {

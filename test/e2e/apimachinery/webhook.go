@@ -17,6 +17,7 @@ limitations under the License.
 package apimachinery
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -30,7 +31,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	crdclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -59,24 +60,23 @@ const (
 	serviceName     = "e2e-test-webhook"
 	roleBindingName = "webhook-auth-reader"
 
-	skipNamespaceLabelKey     = "skip-webhook-admission"
-	skipNamespaceLabelValue   = "yes"
-	skippedNamespaceName      = "exempted-namesapce"
-	disallowedPodName         = "disallowed-pod"
-	toBeAttachedPodName       = "to-be-attached-pod"
-	hangingPodName            = "hanging-pod"
-	disallowedConfigMapName   = "disallowed-configmap"
-	nonDeletableConfigmapName = "nondeletable-configmap"
-	allowedConfigMapName      = "allowed-configmap"
-	failNamespaceLabelKey     = "fail-closed-webhook"
-	failNamespaceLabelValue   = "yes"
-	failNamespaceName         = "fail-closed-namesapce"
-	addedLabelKey             = "added-label"
-	addedLabelValue           = "yes"
+	skipNamespaceLabelKey   = "skip-webhook-admission"
+	skipNamespaceLabelValue = "yes"
+	skippedNamespaceName    = "exempted-namesapce"
+	disallowedPodName       = "disallowed-pod"
+	toBeAttachedPodName     = "to-be-attached-pod"
+	hangingPodName          = "hanging-pod"
+	disallowedConfigMapName = "disallowed-configmap"
+	allowedConfigMapName    = "allowed-configmap"
+	failNamespaceLabelKey   = "fail-closed-webhook"
+	failNamespaceLabelValue = "yes"
+	failNamespaceName       = "fail-closed-namesapce"
+	addedLabelKey           = "added-label"
+	addedLabelValue         = "yes"
 )
 
 var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
-	var context *certContext
+	var certCtx *certContext
 	f := framework.NewDefaultFramework("webhook")
 	servicePort := int32(8443)
 	containerPort := int32(8444)
@@ -93,10 +93,10 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		createWebhookConfigurationReadyNamespace(f)
 
 		ginkgo.By("Setting up server cert")
-		context = setupServerCert(namespaceName, serviceName)
+		certCtx = setupServerCert(namespaceName, serviceName)
 		createAuthReaderRoleBinding(f, namespaceName)
 
-		deployWebhookAndService(f, imageutils.GetE2EImage(imageutils.Agnhost), context, servicePort, containerPort)
+		deployWebhookAndService(f, imageutils.GetE2EImage(imageutils.Agnhost), certCtx, servicePort, containerPort)
 	})
 
 	ginkgo.AfterEach(func() {
@@ -115,7 +115,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		{
 			ginkgo.By("fetching the /apis discovery document")
 			apiGroupList := &metav1.APIGroupList{}
-			err := client.Discovery().RESTClient().Get().AbsPath("/apis").Do().Into(apiGroupList)
+			err := client.Discovery().RESTClient().Get().AbsPath("/apis").Do(context.TODO()).Into(apiGroupList)
 			framework.ExpectNoError(err, "fetching /apis")
 
 			ginkgo.By("finding the admissionregistration.k8s.io API group in the /apis discovery document")
@@ -142,7 +142,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		{
 			ginkgo.By("fetching the /apis/admissionregistration.k8s.io discovery document")
 			group := &metav1.APIGroup{}
-			err := client.Discovery().RESTClient().Get().AbsPath("/apis/admissionregistration.k8s.io").Do().Into(group)
+			err := client.Discovery().RESTClient().Get().AbsPath("/apis/admissionregistration.k8s.io").Do(context.TODO()).Into(group)
 			framework.ExpectNoError(err, "fetching /apis/admissionregistration.k8s.io")
 			framework.ExpectEqual(group.Name, admissionregistrationv1.GroupName, "verifying API group name in /apis/admissionregistration.k8s.io discovery document")
 
@@ -160,7 +160,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		{
 			ginkgo.By("fetching the /apis/admissionregistration.k8s.io/v1 discovery document")
 			apiResourceList := &metav1.APIResourceList{}
-			err := client.Discovery().RESTClient().Get().AbsPath("/apis/admissionregistration.k8s.io/v1").Do().Into(apiResourceList)
+			err := client.Discovery().RESTClient().Get().AbsPath("/apis/admissionregistration.k8s.io/v1").Do(context.TODO()).Into(apiResourceList)
 			framework.ExpectNoError(err, "fetching /apis/admissionregistration.k8s.io/v1")
 			framework.ExpectEqual(apiResourceList.GroupVersion, admissionregistrationv1.SchemeGroupVersion.String(), "verifying API group/version in /apis/admissionregistration.k8s.io/v1 discovery document")
 
@@ -192,7 +192,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		namespace based on the webhook namespace selector MUST be allowed.
 	*/
 	framework.ConformanceIt("should be able to deny pod and configmap creation", func() {
-		webhookCleanup := registerWebhook(f, f.UniqueName, context, servicePort)
+		webhookCleanup := registerWebhook(f, f.UniqueName, certCtx, servicePort)
 		defer webhookCleanup()
 		testWebhook(f)
 	})
@@ -204,7 +204,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		Attempts to attach MUST be denied.
 	*/
 	framework.ConformanceIt("should be able to deny attaching pod", func() {
-		webhookCleanup := registerWebhookForAttachingPod(f, f.UniqueName, context, servicePort)
+		webhookCleanup := registerWebhookForAttachingPod(f, f.UniqueName, certCtx, servicePort)
 		defer webhookCleanup()
 		testAttachingPodWebhook(f)
 	})
@@ -221,7 +221,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 			return
 		}
 		defer testcrd.CleanUp()
-		webhookCleanup := registerWebhookForCustomResource(f, f.UniqueName, context, testcrd, servicePort)
+		webhookCleanup := registerWebhookForCustomResource(f, f.UniqueName, certCtx, testcrd, servicePort)
 		defer webhookCleanup()
 		testCustomResourceWebhook(f, testcrd.Crd, testcrd.DynamicClients["v1"])
 		testBlockingCustomResourceUpdateDeletion(f, testcrd.Crd, testcrd.DynamicClients["v1"])
@@ -234,7 +234,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		Attempt operations that require the admission webhook; all MUST be denied.
 	*/
 	framework.ConformanceIt("should unconditionally reject operations on fail closed webhook", func() {
-		webhookCleanup := registerFailClosedWebhook(f, f.UniqueName, context, servicePort)
+		webhookCleanup := registerFailClosedWebhook(f, f.UniqueName, certCtx, servicePort)
 		defer webhookCleanup()
 		testFailClosedWebhook(f)
 	})
@@ -247,7 +247,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		the first webhook is present. Attempt to create a config map; both keys MUST be added to the config map.
 	*/
 	framework.ConformanceIt("should mutate configmap", func() {
-		webhookCleanup := registerMutatingWebhookForConfigMap(f, f.UniqueName, context, servicePort)
+		webhookCleanup := registerMutatingWebhookForConfigMap(f, f.UniqueName, certCtx, servicePort)
 		defer webhookCleanup()
 		testMutatingConfigMapWebhook(f)
 	})
@@ -259,7 +259,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		the InitContainer MUST be added the TerminationMessagePolicy MUST be defaulted.
 	*/
 	framework.ConformanceIt("should mutate pod and apply defaults after mutation", func() {
-		webhookCleanup := registerMutatingWebhookForPod(f, f.UniqueName, context, servicePort)
+		webhookCleanup := registerMutatingWebhookForPod(f, f.UniqueName, certCtx, servicePort)
 		defer webhookCleanup()
 		testMutatingPodWebhook(f)
 	})
@@ -272,11 +272,11 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		MUST NOT be mutated the webhooks.
 	*/
 	framework.ConformanceIt("should not be able to mutate or prevent deletion of webhook configuration objects", func() {
-		validatingWebhookCleanup := registerValidatingWebhookForWebhookConfigurations(f, f.UniqueName+"blocking", context, servicePort)
+		validatingWebhookCleanup := registerValidatingWebhookForWebhookConfigurations(f, f.UniqueName+"blocking", certCtx, servicePort)
 		defer validatingWebhookCleanup()
-		mutatingWebhookCleanup := registerMutatingWebhookForWebhookConfigurations(f, f.UniqueName+"blocking", context, servicePort)
+		mutatingWebhookCleanup := registerMutatingWebhookForWebhookConfigurations(f, f.UniqueName+"blocking", certCtx, servicePort)
 		defer mutatingWebhookCleanup()
-		testWebhooksForWebhookConfigurations(f, f.UniqueName, context, servicePort)
+		testWebhooksForWebhookConfigurations(f, f.UniqueName, certCtx, servicePort)
 	})
 
 	/*
@@ -291,7 +291,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 			return
 		}
 		defer testcrd.CleanUp()
-		webhookCleanup := registerMutatingWebhookForCustomResource(f, f.UniqueName, context, testcrd, servicePort)
+		webhookCleanup := registerMutatingWebhookForCustomResource(f, f.UniqueName, certCtx, testcrd, servicePort)
 		defer webhookCleanup()
 		testMutatingCustomResourceWebhook(f, testcrd.Crd, testcrd.DynamicClients["v1"], false)
 	})
@@ -303,7 +303,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		custom resource definition; the create request MUST be denied.
 	*/
 	framework.ConformanceIt("should deny crd creation", func() {
-		crdWebhookCleanup := registerValidatingWebhookForCRD(f, f.UniqueName, context, servicePort)
+		crdWebhookCleanup := registerValidatingWebhookForCRD(f, f.UniqueName, certCtx, servicePort)
 		defer crdWebhookCleanup()
 
 		testCRDDenyWebhook(f)
@@ -323,7 +323,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 			return
 		}
 		defer testcrd.CleanUp()
-		webhookCleanup := registerMutatingWebhookForCustomResource(f, f.UniqueName, context, testcrd, servicePort)
+		webhookCleanup := registerMutatingWebhookForCustomResource(f, f.UniqueName, certCtx, testcrd, servicePort)
 		defer webhookCleanup()
 		testMultiVersionCustomResourceWebhook(f, testcrd)
 	})
@@ -361,7 +361,7 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 			return
 		}
 		defer testcrd.CleanUp()
-		webhookCleanup := registerMutatingWebhookForCustomResource(f, f.UniqueName, context, testcrd, servicePort)
+		webhookCleanup := registerMutatingWebhookForCustomResource(f, f.UniqueName, certCtx, testcrd, servicePort)
 		defer webhookCleanup()
 		testMutatingCustomResourceWebhook(f, testcrd.Crd, testcrd.DynamicClients["v1"], prune)
 	})
@@ -380,22 +380,22 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 		policyIgnore := admissionregistrationv1.Ignore
 
 		ginkgo.By("Setting timeout (1s) shorter than webhook latency (5s)")
-		slowWebhookCleanup := registerSlowWebhook(f, f.UniqueName, context, &policyFail, pointer.Int32Ptr(1), servicePort)
+		slowWebhookCleanup := registerSlowWebhook(f, f.UniqueName, certCtx, &policyFail, pointer.Int32Ptr(1), servicePort)
 		testSlowWebhookTimeoutFailEarly(f)
 		slowWebhookCleanup()
 
 		ginkgo.By("Having no error when timeout is shorter than webhook latency and failure policy is ignore")
-		slowWebhookCleanup = registerSlowWebhook(f, f.UniqueName, context, &policyIgnore, pointer.Int32Ptr(1), servicePort)
+		slowWebhookCleanup = registerSlowWebhook(f, f.UniqueName, certCtx, &policyIgnore, pointer.Int32Ptr(1), servicePort)
 		testSlowWebhookTimeoutNoError(f)
 		slowWebhookCleanup()
 
 		ginkgo.By("Having no error when timeout is longer than webhook latency")
-		slowWebhookCleanup = registerSlowWebhook(f, f.UniqueName, context, &policyFail, pointer.Int32Ptr(10), servicePort)
+		slowWebhookCleanup = registerSlowWebhook(f, f.UniqueName, certCtx, &policyFail, pointer.Int32Ptr(10), servicePort)
 		testSlowWebhookTimeoutNoError(f)
 		slowWebhookCleanup()
 
 		ginkgo.By("Having no error when timeout is empty (defaulted to 10s in v1)")
-		slowWebhookCleanup = registerSlowWebhook(f, f.UniqueName, context, &policyFail, nil, servicePort)
+		slowWebhookCleanup = registerSlowWebhook(f, f.UniqueName, certCtx, &policyFail, nil, servicePort)
 		testSlowWebhookTimeoutNoError(f)
 		slowWebhookCleanup()
 	})
@@ -417,8 +417,8 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 				Name: f.UniqueName,
 			},
 			Webhooks: []admissionregistrationv1.ValidatingWebhook{
-				newDenyConfigMapWebhookFixture(f, context, servicePort),
-				newValidatingIsReadyWebhookFixture(f, context, servicePort),
+				newDenyConfigMapWebhookFixture(f, certCtx, servicePort),
+				newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 			},
 		})
 		framework.ExpectNoError(err, "Creating validating webhook configuration")
@@ -513,8 +513,8 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 				Name: f.UniqueName,
 			},
 			Webhooks: []admissionregistrationv1.MutatingWebhook{
-				newMutateConfigMapWebhookFixture(f, context, 1, servicePort),
-				newMutatingIsReadyWebhookFixture(f, context, servicePort),
+				newMutateConfigMapWebhookFixture(f, certCtx, 1, servicePort),
+				newMutatingIsReadyWebhookFixture(f, certCtx, servicePort),
 			},
 		})
 		framework.ExpectNoError(err, "Creating mutating webhook configuration")
@@ -590,8 +590,8 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 					Labels: map[string]string{"e2e-list-test-uuid": testUUID},
 				},
 				Webhooks: []admissionregistrationv1.ValidatingWebhook{
-					newDenyConfigMapWebhookFixture(f, context, servicePort),
-					newValidatingIsReadyWebhookFixture(f, context, servicePort),
+					newDenyConfigMapWebhookFixture(f, certCtx, servicePort),
+					newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 				},
 			})
 			framework.ExpectNoError(err, "Creating validating webhook configuration")
@@ -664,8 +664,8 @@ var _ = SIGDescribe("AdmissionWebhook [Privileged:ClusterAdmin]", func() {
 					Labels: map[string]string{"e2e-list-test-uuid": testUUID},
 				},
 				Webhooks: []admissionregistrationv1.MutatingWebhook{
-					newMutateConfigMapWebhookFixture(f, context, 1, servicePort),
-					newMutatingIsReadyWebhookFixture(f, context, servicePort),
+					newMutateConfigMapWebhookFixture(f, certCtx, 1, servicePort),
+					newMutatingIsReadyWebhookFixture(f, certCtx, servicePort),
 				},
 			})
 			framework.ExpectNoError(err, "Creating mutating webhook configuration")
@@ -740,14 +740,14 @@ func createAuthReaderRoleBinding(f *framework.Framework, namespace string) {
 			},
 		},
 	})
-	if err != nil && errors.IsAlreadyExists(err) {
+	if err != nil && apierrors.IsAlreadyExists(err) {
 		framework.Logf("role binding %s already exists", roleBindingName)
 	} else {
 		framework.ExpectNoError(err, "creating role binding %s:webhook to access configMap", namespace)
 	}
 }
 
-func deployWebhookAndService(f *framework.Framework, image string, context *certContext, servicePort int32, containerPort int32) {
+func deployWebhookAndService(f *framework.Framework, image string, certCtx *certContext, servicePort int32, containerPort int32) {
 	ginkgo.By("Deploying the webhook pod")
 	client := f.ClientSet
 
@@ -758,8 +758,8 @@ func deployWebhookAndService(f *framework.Framework, image string, context *cert
 		},
 		Type: v1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"tls.crt": context.cert,
-			"tls.key": context.key,
+			"tls.crt": certCtx.cert,
+			"tls.key": certCtx.key,
 		},
 	}
 	namespace := f.Namespace.Name
@@ -877,7 +877,7 @@ func deployWebhookAndService(f *framework.Framework, image string, context *cert
 
 func strPtr(s string) *string { return &s }
 
-func registerWebhook(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerWebhook(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By("Registering the webhook via the AdmissionRegistration API")
 
@@ -895,14 +895,14 @@ func registerWebhook(f *framework.Framework, configName string, context *certCon
 			Name: configName,
 		},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
-			newDenyPodWebhookFixture(f, context, servicePort),
-			newDenyConfigMapWebhookFixture(f, context, servicePort),
+			newDenyPodWebhookFixture(f, certCtx, servicePort),
+			newDenyConfigMapWebhookFixture(f, certCtx, servicePort),
 			// Server cannot talk to this webhook, so it always fails.
 			// Because this webhook is configured fail-open, request should be admitted after the call fails.
 			failOpenHook,
 
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering webhook config %s with namespace %s", configName, namespace)
@@ -915,7 +915,7 @@ func registerWebhook(f *framework.Framework, configName string, context *certCon
 	}
 }
 
-func registerWebhookForAttachingPod(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerWebhookForAttachingPod(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By("Registering the webhook via the AdmissionRegistration API")
 
@@ -944,7 +944,7 @@ func registerWebhookForAttachingPod(f *framework.Framework, configName string, c
 						Path:      strPtr("/pods/attach"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -954,7 +954,7 @@ func registerWebhookForAttachingPod(f *framework.Framework, configName string, c
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering webhook config %s with namespace %s", configName, namespace)
@@ -967,7 +967,7 @@ func registerWebhookForAttachingPod(f *framework.Framework, configName string, c
 	}
 }
 
-func registerMutatingWebhookForConfigMap(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerMutatingWebhookForConfigMap(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By("Registering the mutating configmap webhook via the AdmissionRegistration API")
 
@@ -978,10 +978,10 @@ func registerMutatingWebhookForConfigMap(f *framework.Framework, configName stri
 			Name: configName,
 		},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
-			newMutateConfigMapWebhookFixture(f, context, 1, servicePort),
-			newMutateConfigMapWebhookFixture(f, context, 2, servicePort),
+			newMutateConfigMapWebhookFixture(f, certCtx, 1, servicePort),
+			newMutateConfigMapWebhookFixture(f, certCtx, 2, servicePort),
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newMutatingIsReadyWebhookFixture(f, context, servicePort),
+			newMutatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering mutating webhook config %s with namespace %s", configName, namespace)
@@ -996,7 +996,7 @@ func testMutatingConfigMapWebhook(f *framework.Framework) {
 	client := f.ClientSet
 	configMap := toBeMutatedConfigMap(f)
 	mutatedConfigMap, err := client.CoreV1().ConfigMaps(f.Namespace.Name).Create(configMap)
-	gomega.Expect(err).To(gomega.BeNil())
+	framework.ExpectNoError(err)
 	expectedConfigMapData := map[string]string{
 		"mutation-start":   "yes",
 		"mutation-stage-1": "yes",
@@ -1007,7 +1007,7 @@ func testMutatingConfigMapWebhook(f *framework.Framework) {
 	}
 }
 
-func registerMutatingWebhookForPod(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerMutatingWebhookForPod(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By("Registering the mutating pod webhook via the AdmissionRegistration API")
 
@@ -1036,7 +1036,7 @@ func registerMutatingWebhookForPod(f *framework.Framework, configName string, co
 						Path:      strPtr("/mutating-pods"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -1046,7 +1046,7 @@ func registerMutatingWebhookForPod(f *framework.Framework, configName string, co
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newMutatingIsReadyWebhookFixture(f, context, servicePort),
+			newMutatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering mutating webhook config %s with namespace %s", configName, namespace)
@@ -1121,7 +1121,7 @@ func testWebhook(f *framework.Framework) {
 		framework.Failf("expect error %q, got %q", "deadline", err.Error())
 	}
 	// ensure the pod was not actually created
-	if _, err := client.CoreV1().Pods(f.Namespace.Name).Get(pod.Name, metav1.GetOptions{}); !errors.IsNotFound(err) {
+	if _, err := client.CoreV1().Pods(f.Namespace.Name).Get(pod.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		framework.Failf("expect notfound error looking for rejected pod, got %v", err)
 	}
 
@@ -1187,36 +1187,6 @@ func testWebhook(f *framework.Framework) {
 	framework.ExpectNoError(err, "failed to create configmap %s in namespace: %s", configmap.Name, skippedNamespaceName)
 }
 
-func testBlockingConfigmapDeletion(f *framework.Framework) {
-	ginkgo.By("create a configmap that should be denied by the webhook when deleting")
-	client := f.ClientSet
-	configmap := nonDeletableConfigmap(f)
-	_, err := client.CoreV1().ConfigMaps(f.Namespace.Name).Create(configmap)
-	framework.ExpectNoError(err, "failed to create configmap %s in namespace: %s", configmap.Name, f.Namespace.Name)
-
-	ginkgo.By("deleting the configmap should be denied by the webhook")
-	err = client.CoreV1().ConfigMaps(f.Namespace.Name).Delete(configmap.Name, &metav1.DeleteOptions{})
-	framework.ExpectError(err, "deleting configmap %s in namespace: %s should be denied", configmap.Name, f.Namespace.Name)
-	expectedErrMsg1 := "the configmap cannot be deleted because it contains unwanted key and value"
-	if !strings.Contains(err.Error(), expectedErrMsg1) {
-		framework.Failf("expect error contains %q, got %q", expectedErrMsg1, err.Error())
-	}
-
-	ginkgo.By("remove the offending key and value from the configmap data")
-	toCompliantFn := func(cm *v1.ConfigMap) {
-		if cm.Data == nil {
-			cm.Data = map[string]string{}
-		}
-		cm.Data["webhook-e2e-test"] = "webhook-allow"
-	}
-	_, err = updateConfigMap(client, f.Namespace.Name, configmap.Name, toCompliantFn)
-	framework.ExpectNoError(err, "failed to update configmap %s in namespace: %s", configmap.Name, f.Namespace.Name)
-
-	ginkgo.By("deleting the updated configmap should be successful")
-	err = client.CoreV1().ConfigMaps(f.Namespace.Name).Delete(configmap.Name, &metav1.DeleteOptions{})
-	framework.ExpectNoError(err, "failed to delete configmap %s in namespace: %s", configmap.Name, f.Namespace.Name)
-}
-
 func testAttachingPodWebhook(f *framework.Framework) {
 	ginkgo.By("create a pod")
 	client := f.ClientSet
@@ -1229,7 +1199,7 @@ func testAttachingPodWebhook(f *framework.Framework) {
 	ginkgo.By("'kubectl attach' the pod, should be denied by the webhook")
 	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
-	_, err = framework.NewKubectlCommand("attach", fmt.Sprintf("--namespace=%v", f.Namespace.Name), pod.Name, "-i", "-c=container1").WithTimeout(timer.C).Exec()
+	_, err = framework.NewKubectlCommand(f.Namespace.Name, "attach", fmt.Sprintf("--namespace=%v", f.Namespace.Name), pod.Name, "-i", "-c=container1").WithTimeout(timer.C).Exec()
 	framework.ExpectError(err, "'kubectl attach' the pod, should be denied by the webhook")
 	if e, a := "attaching to pod 'to-be-attached-pod' is not allowed", err.Error(); !strings.Contains(a, e) {
 		framework.Failf("unexpected 'kubectl attach' error message. expected to contain %q, got %q", e, a)
@@ -1266,7 +1236,7 @@ func failingWebhook(namespace, name string, servicePort int32) admissionregistra
 	}
 }
 
-func registerFailClosedWebhook(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerFailClosedWebhook(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	ginkgo.By("Registering a webhook that server cannot talk to, with fail closed policy, via the AdmissionRegistration API")
 
 	namespace := f.Namespace.Name
@@ -1294,7 +1264,7 @@ func registerFailClosedWebhook(f *framework.Framework, configName string, contex
 			// Because this webhook is configured fail-closed, request should be rejected after the call fails.
 			hook,
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering webhook config %s with namespace %s", configName, namespace)
@@ -1327,12 +1297,12 @@ func testFailClosedWebhook(f *framework.Framework) {
 	}
 	_, err = client.CoreV1().ConfigMaps(failNamespaceName).Create(configmap)
 	framework.ExpectError(err, "create configmap in namespace: %s should be unconditionally rejected by the webhook", failNamespaceName)
-	if !errors.IsInternalError(err) {
+	if !apierrors.IsInternalError(err) {
 		framework.Failf("expect an internal error, got %#v", err)
 	}
 }
 
-func registerValidatingWebhookForWebhookConfigurations(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerValidatingWebhookForWebhookConfigurations(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	var err error
 	client := f.ClientSet
 	ginkgo.By("Registering a validating webhook on ValidatingWebhookConfiguration and MutatingWebhookConfiguration objects, via the AdmissionRegistration API")
@@ -1369,7 +1339,7 @@ func registerValidatingWebhookForWebhookConfigurations(f *framework.Framework, c
 						Path:      strPtr("/always-deny"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -1380,7 +1350,7 @@ func registerValidatingWebhookForWebhookConfigurations(f *framework.Framework, c
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering webhook config %s with namespace %s", configName, namespace)
@@ -1393,7 +1363,7 @@ func registerValidatingWebhookForWebhookConfigurations(f *framework.Framework, c
 	}
 }
 
-func registerMutatingWebhookForWebhookConfigurations(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerMutatingWebhookForWebhookConfigurations(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	var err error
 	client := f.ClientSet
 	ginkgo.By("Registering a mutating webhook on ValidatingWebhookConfiguration and MutatingWebhookConfiguration objects, via the AdmissionRegistration API")
@@ -1430,7 +1400,7 @@ func registerMutatingWebhookForWebhookConfigurations(f *framework.Framework, con
 						Path:      strPtr("/add-label"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -1441,7 +1411,7 @@ func registerMutatingWebhookForWebhookConfigurations(f *framework.Framework, con
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newMutatingIsReadyWebhookFixture(f, context, servicePort),
+			newMutatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering webhook config %s with namespace %s", configName, namespace)
@@ -1457,7 +1427,7 @@ func registerMutatingWebhookForWebhookConfigurations(f *framework.Framework, con
 // This test assumes that the deletion-rejecting webhook defined in
 // registerValidatingWebhookForWebhookConfigurations and the webhook-config-mutating
 // webhook defined in registerMutatingWebhookForWebhookConfigurations already exist.
-func testWebhooksForWebhookConfigurations(f *framework.Framework, configName string, context *certContext, servicePort int32) {
+func testWebhooksForWebhookConfigurations(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) {
 	var err error
 	client := f.ClientSet
 	ginkgo.By("Creating a dummy validating-webhook-configuration object")
@@ -1504,7 +1474,7 @@ func testWebhooksForWebhookConfigurations(f *framework.Framework, configName str
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering webhook config %s with namespace %s", configName, namespace)
@@ -1560,7 +1530,7 @@ func testWebhooksForWebhookConfigurations(f *framework.Framework, configName str
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newMutatingIsReadyWebhookFixture(f, context, servicePort),
+			newMutatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering webhook config %s with namespace %s", configName, namespace)
@@ -1659,17 +1629,6 @@ func namedNonCompliantConfigMap(name string, f *framework.Framework) *v1.ConfigM
 	}
 }
 
-func nonDeletableConfigmap(f *framework.Framework) *v1.ConfigMap {
-	return &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: nonDeletableConfigmapName,
-		},
-		Data: map[string]string{
-			"webhook-e2e-test": "webhook-nondeletable",
-		},
-	}
-}
-
 func toBeMutatedConfigMap(f *framework.Framework) *v1.ConfigMap {
 	return namedToBeMutatedConfigMap("to-be-mutated", f)
 }
@@ -1703,7 +1662,7 @@ func updateConfigMap(c clientset.Interface, ns, name string, update updateConfig
 			return true, nil
 		}
 		// Only retry update on conflict
-		if !errors.IsConflict(err) {
+		if !apierrors.IsConflict(err) {
 			return false, err
 		}
 		return false, nil
@@ -1725,7 +1684,7 @@ func updateCustomResource(c dynamic.ResourceInterface, ns, name string, update u
 			return true, nil
 		}
 		// Only retry update on conflict
-		if !errors.IsConflict(err) {
+		if !apierrors.IsConflict(err) {
 			return false, err
 		}
 		return false, nil
@@ -1740,7 +1699,7 @@ func cleanWebhookTest(client clientset.Interface, namespaceName string) {
 	_ = client.RbacV1().RoleBindings("kube-system").Delete(roleBindingName, nil)
 }
 
-func registerWebhookForCustomResource(f *framework.Framework, configName string, context *certContext, testcrd *crd.TestCrd, servicePort int32) func() {
+func registerWebhookForCustomResource(f *framework.Framework, configName string, certCtx *certContext, testcrd *crd.TestCrd, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By("Registering the custom resource webhook via the AdmissionRegistration API")
 
@@ -1769,7 +1728,7 @@ func registerWebhookForCustomResource(f *framework.Framework, configName string,
 						Path:      strPtr("/custom-resource"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -1779,7 +1738,7 @@ func registerWebhookForCustomResource(f *framework.Framework, configName string,
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering custom resource webhook config %s with namespace %s", configName, namespace)
@@ -1791,7 +1750,7 @@ func registerWebhookForCustomResource(f *framework.Framework, configName string,
 	}
 }
 
-func registerMutatingWebhookForCustomResource(f *framework.Framework, configName string, context *certContext, testcrd *crd.TestCrd, servicePort int32) func() {
+func registerMutatingWebhookForCustomResource(f *framework.Framework, configName string, certCtx *certContext, testcrd *crd.TestCrd, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By(fmt.Sprintf("Registering the mutating webhook for custom resource %s via the AdmissionRegistration API", testcrd.Crd.Name))
 
@@ -1820,7 +1779,7 @@ func registerMutatingWebhookForCustomResource(f *framework.Framework, configName
 						Path:      strPtr("/mutating-custom-resource"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -1846,7 +1805,7 @@ func registerMutatingWebhookForCustomResource(f *framework.Framework, configName
 						Path:      strPtr("/mutating-custom-resource"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -1856,7 +1815,7 @@ func registerMutatingWebhookForCustomResource(f *framework.Framework, configName
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newMutatingIsReadyWebhookFixture(f, context, servicePort),
+			newMutatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering custom resource webhook config %s with namespace %s", configName, namespace)
@@ -2044,7 +2003,7 @@ func testMultiVersionCustomResourceWebhook(f *framework.Framework, testcrd *crd.
 	}
 }
 
-func registerValidatingWebhookForCRD(f *framework.Framework, configName string, context *certContext, servicePort int32) func() {
+func registerValidatingWebhookForCRD(f *framework.Framework, configName string, certCtx *certContext, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By("Registering the crd webhook via the AdmissionRegistration API")
 
@@ -2077,7 +2036,7 @@ func registerValidatingWebhookForCRD(f *framework.Framework, configName string, 
 						Path:      strPtr("/crd"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				SideEffects:             &sideEffectsNone,
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -2087,7 +2046,7 @@ func registerValidatingWebhookForCRD(f *framework.Framework, configName string, 
 				},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering crd webhook config %s with namespace %s", configName, namespace)
@@ -2175,7 +2134,7 @@ func labelNamespace(f *framework.Framework, namespace string) {
 	framework.ExpectNoError(err, "error labeling namespace %s", namespace)
 }
 
-func registerSlowWebhook(f *framework.Framework, configName string, context *certContext, policy *admissionregistrationv1.FailurePolicyType, timeout *int32, servicePort int32) func() {
+func registerSlowWebhook(f *framework.Framework, configName string, certCtx *certContext, policy *admissionregistrationv1.FailurePolicyType, timeout *int32, servicePort int32) func() {
 	client := f.ClientSet
 	ginkgo.By("Registering slow webhook via the AdmissionRegistration API")
 
@@ -2204,7 +2163,7 @@ func registerSlowWebhook(f *framework.Framework, configName string, context *cer
 						Path:      strPtr("/always-allow-delay-5s"),
 						Port:      pointer.Int32Ptr(servicePort),
 					},
-					CABundle: context.signingCert,
+					CABundle: certCtx.signingCert,
 				},
 				// Scope the webhook to just this namespace
 				NamespaceSelector: &metav1.LabelSelector{
@@ -2216,7 +2175,7 @@ func registerSlowWebhook(f *framework.Framework, configName string, context *cer
 				AdmissionReviewVersions: []string{"v1", "v1beta1"},
 			},
 			// Register a webhook that can be probed by marker requests to detect when the configuration is ready.
-			newValidatingIsReadyWebhookFixture(f, context, servicePort),
+			newValidatingIsReadyWebhookFixture(f, certCtx, servicePort),
 		},
 	})
 	framework.ExpectNoError(err, "registering slow webhook config %s with namespace %s", configName, namespace)
@@ -2326,7 +2285,7 @@ func createMutatingWebhookConfiguration(f *framework.Framework, config *admissio
 	return f.ClientSet.AdmissionregistrationV1().MutatingWebhookConfigurations().Create(config)
 }
 
-func newDenyPodWebhookFixture(f *framework.Framework, context *certContext, servicePort int32) admissionregistrationv1.ValidatingWebhook {
+func newDenyPodWebhookFixture(f *framework.Framework, certCtx *certContext, servicePort int32) admissionregistrationv1.ValidatingWebhook {
 	sideEffectsNone := admissionregistrationv1.SideEffectClassNone
 	return admissionregistrationv1.ValidatingWebhook{
 		Name: "deny-unwanted-pod-container-name-and-label.k8s.io",
@@ -2345,7 +2304,7 @@ func newDenyPodWebhookFixture(f *framework.Framework, context *certContext, serv
 				Path:      strPtr("/pods"),
 				Port:      pointer.Int32Ptr(servicePort),
 			},
-			CABundle: context.signingCert,
+			CABundle: certCtx.signingCert,
 		},
 		SideEffects:             &sideEffectsNone,
 		AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -2356,7 +2315,7 @@ func newDenyPodWebhookFixture(f *framework.Framework, context *certContext, serv
 	}
 }
 
-func newDenyConfigMapWebhookFixture(f *framework.Framework, context *certContext, servicePort int32) admissionregistrationv1.ValidatingWebhook {
+func newDenyConfigMapWebhookFixture(f *framework.Framework, certCtx *certContext, servicePort int32) admissionregistrationv1.ValidatingWebhook {
 	sideEffectsNone := admissionregistrationv1.SideEffectClassNone
 	return admissionregistrationv1.ValidatingWebhook{
 		Name: "deny-unwanted-configmap-data.k8s.io",
@@ -2386,14 +2345,14 @@ func newDenyConfigMapWebhookFixture(f *framework.Framework, context *certContext
 				Path:      strPtr("/configmaps"),
 				Port:      pointer.Int32Ptr(servicePort),
 			},
-			CABundle: context.signingCert,
+			CABundle: certCtx.signingCert,
 		},
 		SideEffects:             &sideEffectsNone,
 		AdmissionReviewVersions: []string{"v1", "v1beta1"},
 	}
 }
 
-func newMutateConfigMapWebhookFixture(f *framework.Framework, context *certContext, stage int, servicePort int32) admissionregistrationv1.MutatingWebhook {
+func newMutateConfigMapWebhookFixture(f *framework.Framework, certCtx *certContext, stage int, servicePort int32) admissionregistrationv1.MutatingWebhook {
 	sideEffectsNone := admissionregistrationv1.SideEffectClassNone
 	return admissionregistrationv1.MutatingWebhook{
 		Name: fmt.Sprintf("adding-configmap-data-stage-%d.k8s.io", stage),
@@ -2412,7 +2371,7 @@ func newMutateConfigMapWebhookFixture(f *framework.Framework, context *certConte
 				Path:      strPtr("/mutating-configmaps"),
 				Port:      pointer.Int32Ptr(servicePort),
 			},
-			CABundle: context.signingCert,
+			CABundle: certCtx.signingCert,
 		},
 		SideEffects:             &sideEffectsNone,
 		AdmissionReviewVersions: []string{"v1", "v1beta1"},
@@ -2467,7 +2426,7 @@ func waitWebhookConfigurationReady(f *framework.Framework) error {
 
 // newValidatingIsReadyWebhookFixture creates a validating webhook that can be added to a webhook configuration and then probed
 // with "marker" requests via waitWebhookConfigurationReady to wait for a webhook configuration to be ready.
-func newValidatingIsReadyWebhookFixture(f *framework.Framework, context *certContext, servicePort int32) admissionregistrationv1.ValidatingWebhook {
+func newValidatingIsReadyWebhookFixture(f *framework.Framework, certCtx *certContext, servicePort int32) admissionregistrationv1.ValidatingWebhook {
 	sideEffectsNone := admissionregistrationv1.SideEffectClassNone
 	failOpen := admissionregistrationv1.Ignore
 	return admissionregistrationv1.ValidatingWebhook{
@@ -2487,7 +2446,7 @@ func newValidatingIsReadyWebhookFixture(f *framework.Framework, context *certCon
 				Path:      strPtr("/always-deny"),
 				Port:      pointer.Int32Ptr(servicePort),
 			},
-			CABundle: context.signingCert,
+			CABundle: certCtx.signingCert,
 		},
 		// network failures while the service network routing is being set up should be ignored by the marker
 		FailurePolicy:           &failOpen,
@@ -2506,7 +2465,7 @@ func newValidatingIsReadyWebhookFixture(f *framework.Framework, context *certCon
 
 // newMutatingIsReadyWebhookFixture creates a mutating webhook that can be added to a webhook configuration and then probed
 // with "marker" requests via waitWebhookConfigurationReady to wait for a webhook configuration to be ready.
-func newMutatingIsReadyWebhookFixture(f *framework.Framework, context *certContext, servicePort int32) admissionregistrationv1.MutatingWebhook {
+func newMutatingIsReadyWebhookFixture(f *framework.Framework, certCtx *certContext, servicePort int32) admissionregistrationv1.MutatingWebhook {
 	sideEffectsNone := admissionregistrationv1.SideEffectClassNone
 	failOpen := admissionregistrationv1.Ignore
 	return admissionregistrationv1.MutatingWebhook{
@@ -2526,7 +2485,7 @@ func newMutatingIsReadyWebhookFixture(f *framework.Framework, context *certConte
 				Path:      strPtr("/always-deny"),
 				Port:      pointer.Int32Ptr(servicePort),
 			},
-			CABundle: context.signingCert,
+			CABundle: certCtx.signingCert,
 		},
 		// network failures while the service network routing is being set up should be ignored by the marker
 		FailurePolicy:           &failOpen,

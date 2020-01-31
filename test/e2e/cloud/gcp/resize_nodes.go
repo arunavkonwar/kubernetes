@@ -27,6 +27,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 
 	"github.com/onsi/ginkgo"
 )
@@ -54,7 +55,7 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 		systemPods, err := e2epod.GetPodsInNamespace(c, ns, map[string]string{})
 		framework.ExpectNoError(err)
 		systemPodsNo = int32(len(systemPods))
-		if strings.Index(framework.TestContext.CloudConfig.NodeInstanceGroup, ",") >= 0 {
+		if strings.Contains(framework.TestContext.CloudConfig.NodeInstanceGroup, ",") {
 			framework.Failf("Test dose not support cluster setup with more than one MIG: %s", framework.TestContext.CloudConfig.NodeInstanceGroup)
 		} else {
 			group = framework.TestContext.CloudConfig.NodeInstanceGroup
@@ -68,8 +69,8 @@ var _ = SIGDescribe("Nodes [Disruptive]", func() {
 
 		ginkgo.BeforeEach(func() {
 			skipped = true
-			framework.SkipUnlessProviderIs("gce", "gke", "aws")
-			framework.SkipUnlessNodeCountIsAtLeast(2)
+			e2eskipper.SkipUnlessProviderIs("gce", "gke", "aws")
+			e2eskipper.SkipUnlessNodeCountIsAtLeast(2)
 			skipped = false
 		})
 

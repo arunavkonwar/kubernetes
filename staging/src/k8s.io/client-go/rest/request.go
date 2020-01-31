@@ -61,8 +61,8 @@ type HTTPClient interface {
 // ResponseWrapper is an interface for getting a response.
 // The response may be either accessed as a raw data (the whole output is put into memory) or as a stream.
 type ResponseWrapper interface {
-	DoRaw() ([]byte, error)
-	Stream() (io.ReadCloser, error)
+	DoRaw(context.Context) ([]byte, error)
+	Stream(context.Context) (io.ReadCloser, error)
 }
 
 // RequestConstructionError is returned when there's an error assembling a request.
@@ -104,9 +104,6 @@ type Request struct {
 	// output
 	err  error
 	body io.Reader
-
-	// This is only used for per-request timeouts, deadlines, and cancellations.
-	ctx context.Context
 }
 
 // NewRequest creates a new request helper object for accessing runtime.Objects on a server.
@@ -438,13 +435,6 @@ func (r *Request) Body(obj interface{}) *Request {
 	return r
 }
 
-// Context adds a context to the request. Contexts are only used for
-// timeouts, deadlines, and cancellations.
-func (r *Request) Context(ctx context.Context) *Request {
-	r.ctx = ctx
-	return r
-}
-
 // URL returns the current working URL.
 func (r *Request) URL() *url.URL {
 	p := r.pathPrefix
@@ -548,21 +538,17 @@ func (r Request) finalURLTemplate() url.URL {
 	return *url
 }
 
-func (r *Request) tryThrottle() error {
+func (r *Request) tryThrottle(ctx context.Context) error {
 	if r.rateLimiter == nil {
 		return nil
 	}
 
 	now := time.Now()
-	var err error
-	if r.ctx != nil {
-		err = r.rateLimiter.Wait(r.ctx)
-	} else {
-		r.rateLimiter.Accept()
-	}
+
+	err := r.rateLimiter.Wait(ctx)
 
 	if latency := time.Since(now); latency > longThrottleLatency {
-		klog.V(4).Infof("Throttling request took %v, request: %s:%s", latency, r.verb, r.URL().String())
+		klog.V(3).Infof("Throttling request took %v, request: %s:%s", latency, r.verb, r.URL().String())
 	}
 
 	return err
@@ -570,7 +556,7 @@ func (r *Request) tryThrottle() error {
 
 // Watch attempts to begin watching the requested location.
 // Returns a watch.Interface, or an error.
-func (r *Request) Watch() (watch.Interface, error) {
+func (r *Request) Watch(ctx context.Context) (watch.Interface, error) {
 	// We specifically don't want to rate limit watches, so we
 	// don't use r.rateLimiter here.
 	if r.err != nil {
@@ -582,9 +568,7 @@ func (r *Request) Watch() (watch.Interface, error) {
 	if err != nil {
 		return nil, err
 	}
-	if r.ctx != nil {
-		req = req.WithContext(r.ctx)
-	}
+	req = req.WithContext(ctx)
 	req.Header = r.headers
 	client := r.c.Client
 	if client == nil {
@@ -659,12 +643,12 @@ func updateURLMetrics(req *Request, resp *http.Response, err error) {
 // Returns io.ReadCloser which could be used for streaming of the response, or an error
 // Any non-2xx http status code causes an error.  If we get a non-2xx code, we try to convert the body into an APIStatus object.
 // If we can, we return that as an error.  Otherwise, we create an error that lists the http status and the content of the response.
-func (r *Request) Stream() (io.ReadCloser, error) {
+func (r *Request) Stream(ctx context.Context) (io.ReadCloser, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
 
-	if err := r.tryThrottle(); err != nil {
+	if err := r.tryThrottle(ctx); err != nil {
 		return nil, err
 	}
 
@@ -676,9 +660,7 @@ func (r *Request) Stream() (io.ReadCloser, error) {
 	if r.body != nil {
 		req.Body = ioutil.NopCloser(r.body)
 	}
-	if r.ctx != nil {
-		req = req.WithContext(r.ctx)
-	}
+	req = req.WithContext(ctx)
 	req.Header = r.headers
 	client := r.c.Client
 	if client == nil {
@@ -746,7 +728,7 @@ func (r *Request) requestPreflightCheck() error {
 // received. It handles retry behavior and up front validation of requests. It will invoke
 // fn at most once. It will return an error if a problem occurred prior to connecting to the
 // server - the provided function is responsible for handling server errors.
-func (r *Request) request(fn func(*http.Request, *http.Response)) error {
+func (r *Request) request(ctx context.Context, fn func(*http.Request, *http.Response)) error {
 	//Metrics for total request latency
 	start := time.Now()
 	defer func() {
@@ -767,26 +749,30 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 		client = http.DefaultClient
 	}
 
+	// Throttle the first try before setting up the timeout configured on the
+	// client. We don't want a throttled client to return timeouts to callers
+	// before it makes a single request.
+	if err := r.tryThrottle(ctx); err != nil {
+		return err
+	}
+
+	if r.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.timeout)
+		defer cancel()
+	}
+
 	// Right now we make about ten retry attempts if we get a Retry-After response.
 	maxRetries := 10
 	retries := 0
 	for {
+
 		url := r.URL().String()
 		req, err := http.NewRequest(r.verb, url, r.body)
 		if err != nil {
 			return err
 		}
-		if r.timeout > 0 {
-			if r.ctx == nil {
-				r.ctx = context.Background()
-			}
-			var cancelFn context.CancelFunc
-			r.ctx, cancelFn = context.WithTimeout(r.ctx, r.timeout)
-			defer cancelFn()
-		}
-		if r.ctx != nil {
-			req = req.WithContext(r.ctx)
-		}
+		req = req.WithContext(ctx)
 		req.Header = r.headers
 
 		r.backoff.Sleep(r.backoff.CalculateBackoff(r.URL()))
@@ -794,7 +780,7 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 			// We are retrying the request that we already send to apiserver
 			// at least once before.
 			// This request should also be throttled with the client-internal rate limiter.
-			if err := r.tryThrottle(); err != nil {
+			if err := r.tryThrottle(ctx); err != nil {
 				return err
 			}
 		}
@@ -806,19 +792,24 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 			r.backoff.UpdateBackoff(r.URL(), err, resp.StatusCode)
 		}
 		if err != nil {
-			// "Connection reset by peer" is usually a transient error.
+			// "Connection reset by peer", "Connection refused" or "apiserver is shutting down" are usually a transient errors.
 			// Thus in case of "GET" operations, we simply retry it.
 			// We are not automatically retrying "write" operations, as
 			// they are not idempotent.
-			if !net.IsConnectionReset(err) || r.verb != "GET" {
+			if r.verb != "GET" {
 				return err
 			}
-			// For the purpose of retry, we set the artificial "retry-after" response.
-			// TODO: Should we clean the original response if it exists?
-			resp = &http.Response{
-				StatusCode: http.StatusInternalServerError,
-				Header:     http.Header{"Retry-After": []string{"1"}},
-				Body:       ioutil.NopCloser(bytes.NewReader([]byte{})),
+			// For connection errors and apiserver shutdown errors retry.
+			if net.IsConnectionReset(err) || net.IsConnectionRefused(err) {
+				// For the purpose of retry, we set the artificial "retry-after" response.
+				// TODO: Should we clean the original response if it exists?
+				resp = &http.Response{
+					StatusCode: http.StatusInternalServerError,
+					Header:     http.Header{"Retry-After": []string{"1"}},
+					Body:       ioutil.NopCloser(bytes.NewReader([]byte{})),
+				}
+			} else {
+				return err
 			}
 		}
 
@@ -864,13 +855,9 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 // Error type:
 //  * If the server responds with a status: *errors.StatusError or *errors.UnexpectedObjectError
 //  * http.Client.Do errors are returned directly.
-func (r *Request) Do() Result {
-	if err := r.tryThrottle(); err != nil {
-		return Result{err: err}
-	}
-
+func (r *Request) Do(ctx context.Context) Result {
 	var result Result
-	err := r.request(func(req *http.Request, resp *http.Response) {
+	err := r.request(ctx, func(req *http.Request, resp *http.Response) {
 		result = r.transformResponse(resp, req)
 	})
 	if err != nil {
@@ -880,13 +867,9 @@ func (r *Request) Do() Result {
 }
 
 // DoRaw executes the request but does not process the response body.
-func (r *Request) DoRaw() ([]byte, error) {
-	if err := r.tryThrottle(); err != nil {
-		return nil, err
-	}
-
+func (r *Request) DoRaw(ctx context.Context) ([]byte, error) {
 	var result Result
-	err := r.request(func(req *http.Request, resp *http.Response) {
+	err := r.request(ctx, func(req *http.Request, resp *http.Response) {
 		result.body, result.err = ioutil.ReadAll(resp.Body)
 		glogBody("Response Body", result.body)
 		if resp.StatusCode < http.StatusOK || resp.StatusCode > http.StatusPartialContent {

@@ -40,6 +40,7 @@ type reconciler struct {
 	client               clientset.Interface
 	nodeLister           corelisters.NodeLister
 	maxEndpointsPerSlice int32
+	endpointSliceTracker *endpointSliceTracker
 	metricsCache         *metrics.Cache
 }
 
@@ -212,6 +213,7 @@ func (r *reconciler) finalize(
 			}
 			errs = append(errs, fmt.Errorf("Error creating EndpointSlice for Service %s/%s: %v", service.Namespace, service.Name, err))
 		} else {
+			r.endpointSliceTracker.Update(endpointSlice)
 			metrics.EndpointSliceChanges.WithLabelValues("create").Inc()
 		}
 	}
@@ -222,6 +224,7 @@ func (r *reconciler) finalize(
 		if err != nil {
 			errs = append(errs, fmt.Errorf("Error updating %s EndpointSlice for Service %s/%s: %v", endpointSlice.Name, service.Namespace, service.Name, err))
 		} else {
+			r.endpointSliceTracker.Update(endpointSlice)
 			metrics.EndpointSliceChanges.WithLabelValues("update").Inc()
 		}
 	}
@@ -231,6 +234,7 @@ func (r *reconciler) finalize(
 		if err != nil {
 			errs = append(errs, fmt.Errorf("Error deleting %s EndpointSlice for Service %s/%s: %v", endpointSlice.Name, service.Namespace, service.Name, err))
 		} else {
+			r.endpointSliceTracker.Delete(endpointSlice)
 			metrics.EndpointSliceChanges.WithLabelValues("delete").Inc()
 		}
 	}
@@ -290,9 +294,11 @@ func (r *reconciler) reconcileByPortMapping(
 				// if no endpoints desired in this slice, mark for deletion
 				sliceNamesToDelete.Insert(existingSlice.Name)
 			} else {
-				// otherwise, mark for update
-				existingSlice.Endpoints = newEndpoints
-				sliceNamesToUpdate.Insert(existingSlice.Name)
+				// otherwise, copy and mark for update
+				epSlice := existingSlice.DeepCopy()
+				epSlice.Endpoints = newEndpoints
+				slicesByName[existingSlice.Name] = epSlice
+				sliceNamesToUpdate.Insert(epSlice.Name)
 			}
 		} else {
 			// slices with no changes will be useful if there are leftover endpoints
@@ -344,6 +350,10 @@ func (r *reconciler) reconcileByPortMapping(
 		// If we didn't find a sliceToFill, generate a new empty one.
 		if sliceToFill == nil {
 			sliceToFill = newEndpointSlice(service, endpointMeta)
+		} else {
+			// deep copy required to modify this slice.
+			sliceToFill = sliceToFill.DeepCopy()
+			slicesByName[sliceToFill.Name] = sliceToFill
 		}
 
 		// Fill the slice up with remaining endpoints.

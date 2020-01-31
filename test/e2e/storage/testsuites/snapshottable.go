@@ -23,12 +23,14 @@ import (
 	"github.com/onsi/ginkgo"
 
 	v1 "k8s.io/api/core/v1"
-	apierrs "k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/framework/volume"
 	"k8s.io/kubernetes/test/e2e/storage/testpatterns"
 )
@@ -55,25 +57,25 @@ var _ TestSuite = &snapshottableTestSuite{}
 func InitSnapshottableTestSuite() TestSuite {
 	return &snapshottableTestSuite{
 		tsInfo: TestSuiteInfo{
-			name: "snapshottable",
-			testPatterns: []testpatterns.TestPattern{
+			Name: "snapshottable",
+			TestPatterns: []testpatterns.TestPattern{
 				testpatterns.DynamicSnapshot,
 			},
-			supportedSizeRange: volume.SizeRange{
+			SupportedSizeRange: volume.SizeRange{
 				Min: "1Mi",
 			},
 		},
 	}
 }
 
-func (s *snapshottableTestSuite) getTestSuiteInfo() TestSuiteInfo {
+func (s *snapshottableTestSuite) GetTestSuiteInfo() TestSuiteInfo {
 	return s.tsInfo
 }
 
-func (s *snapshottableTestSuite) skipRedundantSuite(driver TestDriver, pattern testpatterns.TestPattern) {
+func (s *snapshottableTestSuite) SkipRedundantSuite(driver TestDriver, pattern testpatterns.TestPattern) {
 }
 
-func (s *snapshottableTestSuite) defineTests(driver TestDriver, pattern testpatterns.TestPattern) {
+func (s *snapshottableTestSuite) DefineTests(driver TestDriver, pattern testpatterns.TestPattern) {
 	var (
 		sDriver SnapshottableTestDriver
 		dDriver DynamicPVTestDriver
@@ -86,11 +88,11 @@ func (s *snapshottableTestSuite) defineTests(driver TestDriver, pattern testpatt
 		ok := false
 		sDriver, ok = driver.(SnapshottableTestDriver)
 		if !dInfo.Capabilities[CapSnapshotDataSource] || !ok {
-			framework.Skipf("Driver %q does not support snapshots - skipping", dInfo.Name)
+			e2eskipper.Skipf("Driver %q does not support snapshots - skipping", dInfo.Name)
 		}
 		dDriver, ok = driver.(DynamicPVTestDriver)
 		if !ok {
-			framework.Skipf("Driver %q does not support dynamic provisioning - skipping", driver.GetDriverInfo().Name)
+			e2eskipper.Skipf("Driver %q does not support dynamic provisioning - skipping", driver.GetDriverInfo().Name)
 		}
 	})
 
@@ -114,9 +116,9 @@ func (s *snapshottableTestSuite) defineTests(driver TestDriver, pattern testpatt
 		vsc := sDriver.GetSnapshotClass(config)
 		class := dDriver.GetDynamicProvisionStorageClass(config, "")
 		if class == nil {
-			framework.Skipf("Driver %q does not define Dynamic Provision StorageClass - skipping", driver.GetDriverInfo().Name)
+			e2eskipper.Skipf("Driver %q does not define Dynamic Provision StorageClass - skipping", driver.GetDriverInfo().Name)
 		}
-		testVolumeSizeRange := s.getTestSuiteInfo().supportedSizeRange
+		testVolumeSizeRange := s.GetTestSuiteInfo().SupportedSizeRange
 		driverVolumeSizeRange := dDriver.GetDriverInfo().SupportedSizeRange
 		claimSize, err := getSizeRangesIntersection(testVolumeSizeRange, driverVolumeSizeRange)
 		framework.ExpectNoError(err, "determine intersection of test size range %+v and driver size range %+v", testVolumeSizeRange, driverVolumeSizeRange)
@@ -142,10 +144,16 @@ func (s *snapshottableTestSuite) defineTests(driver TestDriver, pattern testpatt
 			framework.Logf("deleting claim %q/%q", pvc.Namespace, pvc.Name)
 			// typically this claim has already been deleted
 			err = cs.CoreV1().PersistentVolumeClaims(pvc.Namespace).Delete(pvc.Name, nil)
-			if err != nil && !apierrs.IsNotFound(err) {
+			if err != nil && !apierrors.IsNotFound(err) {
 				framework.Failf("Error deleting claim %q. Error: %v", pvc.Name, err)
 			}
 		}()
+
+		ginkgo.By("starting a pod to use the claim")
+		command := "echo 'hello world' > /mnt/test/data"
+		pod := StartInPodWithVolume(cs, pvc.Namespace, pvc.Name, "pvc-snapshottable-tester", command, e2epod.NodeSelection{Name: config.ClientNodeName})
+		defer StopPod(cs, pod)
+
 		err = e2epv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, cs, pvc.Namespace, pvc.Name, framework.Poll, framework.ClaimProvisionTimeout)
 		framework.ExpectNoError(err)
 
@@ -175,7 +183,7 @@ func (s *snapshottableTestSuite) defineTests(driver TestDriver, pattern testpatt
 			framework.Logf("deleting snapshot %q/%q", snapshot.GetNamespace(), snapshot.GetName())
 			// typically this snapshot has already been deleted
 			err = dc.Resource(snapshotGVR).Namespace(snapshot.GetNamespace()).Delete(snapshot.GetName(), nil)
-			if err != nil && !apierrs.IsNotFound(err) {
+			if err != nil && !apierrors.IsNotFound(err) {
 				framework.Failf("Error deleting snapshot %q. Error: %v", pvc.Name, err)
 			}
 		}()
@@ -220,10 +228,10 @@ func WaitForSnapshotReady(c dynamic.Interface, ns string, snapshotName string, P
 			}
 			value := status.(map[string]interface{})
 			if value["readyToUse"] == true {
-				framework.Logf("VolumeSnapshot %s found and is ready", snapshotName, time.Since(start))
+				framework.Logf("VolumeSnapshot %s found and is ready after %v", snapshotName, time.Since(start))
 				return nil
 			} else if value["ready"] == true {
-				framework.Logf("VolumeSnapshot %s found and is ready", snapshotName, time.Since(start))
+				framework.Logf("VolumeSnapshot %s found and is ready after %v", snapshotName, time.Since(start))
 				return nil
 			} else {
 				framework.Logf("VolumeSnapshot %s found but is not ready.", snapshotName)
